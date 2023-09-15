@@ -14,7 +14,7 @@ The purpose of this repository is to document and share the research findings, c
 
 ## About Dr. Markus Locher
 
-Dr. Markus Locher is a respected researcher and academician in the field of [mention the field or area of research, e.g., "Computer Science," "Biology," "Physics," etc.]. His expertise and leadership have contributed significantly to the advancement of knowledge in this field. 
+Dr. Markus Locher is a respected researcher and academician in the field of "Computer Science," "Biology", "ML", "DL". His expertise and leadership have contributed significantly to the advancement of knowledge in this field. 
 
 ## Contact Information
 
