@@ -1,0 +1,790 @@
+Video link: 
+--------------
+https://drive.google.com/file/d/1fBUAuhbRDDZrWcvnv8lo7LUFP36DiszQ/view?usp=sharing
+
+Presentation link:
+------------------------- 
+https://docs.google.com/presentation/d/1f_-ca5It-YKLujX5DttHX83mZ7eVTHuP/edit?usp=sharing&ouid=114714758596267325342&rtpof=true&sd=true
+
+Alzheimer Project Source Code Link:
+---------------------------------------------------
+https://github.com/atikul-islam-sajib/GoodPractiseDSID
+
+Alzheimer Project  Website link:
+---------------------------------------------
+https://alzheimer-classifier-app.azurewebsites.net/
+
+Alzheimer Project Documentation Link:
+--------------------------------------------------------
+https://atikul-islam-sajib.github.io/alzheimer-classifier-deploy/
+
+
+Extra work for this project:
+-------------------------------------
+
+LSGAN - Creating the synthetic data for Alzheimer(Source code link):
+https://github.com/atikul-islam-sajib/LSGAN
+
+LSGAN - Creating the synthetic data for Alzheimer(Documentation link):
+https://atikul-islam-sajib.github.io/LSGAN-deploy/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import torch
+import torch.nn as nn
+from torch.nn.utils.spectral_norm import spectral_norm
+from collections import OrderedDict
+
+# Assuming the spectral transformation layers (NaiveDct1d, NaiveDst1d, DctII1d, Dft1d) are defined elsewhere
+
+class SpectralDiscriminator(torch.nn.Module):
+    def __init__(self, num_layers=5, num_units=200, in_features=12, spectral=True, spectral_n_power_iterations=1, minibatch_disc=False, spectral_layer_type='Dft1d'):
+        super(SpectralDiscriminator, self).__init__()
+        self.num_layers = num_layers
+        self.num_units = num_units
+        layers = []
+
+        # Initialize the first layer
+        layers.append(("Flatten 0", nn.Flatten()))
+        if spectral:
+            first_layer = self._select_spectral_layer(spectral_layer_type, in_features, fixed=False)
+            layers.append(("Spectral 0", spectral_norm(first_layer, n_power_iterations=spectral_n_power_iterations)))
+        else:
+            layers.append(("Dense 0", nn.Linear(in_features=in_features, out_features=num_units)))
+        layers.append(("Relu 0", nn.ReLU()))
+
+        # Initialize middle layers
+        for i in range(1, num_layers - 1):
+            layers.append((f"Flatten {i}", nn.Flatten()))
+            if spectral:
+                middle_layer = self._select_spectral_layer(spectral_layer_type, num_units, fixed=False)
+                layers.append((f"Spectral {i}", spectral_norm(middle_layer, n_power_iterations=spectral_n_power_iterations)))
+            else:
+                layers.append((f"Dense {i}", nn.Linear(num_units, num_units)))
+            layers.append((f"Relu {i}", nn.ReLU()))
+
+        # Sequentially add all previous layers
+        self.main = nn.Sequential(OrderedDict(layers))
+        
+        # Add the last spectral transformation layer directly as it is unique and doesn't follow the same pattern
+        self.last_layer = self._select_spectral_layer(spectral_layer_type, num_units, fixed=False)
+        
+        self.apply(self.init_weights)
+
+    def forward(self, input_feature, input_attribute):
+        input_feature = torch.flatten(input_feature, start_dim=1)
+        input_attribute = torch.flatten(input_attribute, start_dim=1)
+        input_ = torch.cat([input_feature, input_attribute], 1)
+        x = self.main(input_)
+        
+        # Apply the last spectral transformation layer
+        output = self.last_layer(x)
+        return torch.squeeze(output, 1)
+
+    def init_weights(self, m):
+        if isinstance(m, nn.Linear) or hasattr(m, 'weight'):  # Assuming spectral layers also have a 'weight' attribute
+            torch.nn.init.xavier_uniform_(m.weight.data, gain=torch.nn.init.calculate_gain("relu"))
+            if hasattr(m, 'bias') and m.bias is not None:
+                m.bias.data.fill_(0.0)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def configure_optimizers(self):
+        # Setting up optimizers based on the specified optimizer type (Adam vs. SGD)
+        optimizers = {}
+        lr_schedulers = {}
+        
+        if self.adam:
+            optimizers['optimizerD'] = optim.Adam(self.discriminator.parameters(), lr=self.d_lr, betas=(self.d_beta1, 0.999))
+            optimizers['optimizerDAttr'] = optim.Adam(self.attr_discriminator.parameters(), lr=self.attr_d_lr, betas=(self.attr_d_beta1, 0.999))
+            optimizers['optimizerG'] = optim.Adam(self.generator.parameters(), lr=self.g_lr, betas=(self.g_beta1, 0.999))
+        else:
+            optimizers['optimizerD'] = optim.SGD(self.discriminator.parameters(), lr=self.d_lr)
+            optimizers['optimizerDAttr'] = optim.SGD(self.attr_discriminator.parameters(), lr=self.attr_d_lr)
+            optimizers['optimizerG'] = optim.SGD(self.generator.parameters(), lr=self.g_lr)
+        
+        # Adding the SpectralDiscriminator optimizer to the dictionary if enabled
+        if self.spectral_discriminator:
+            if self.adam:
+                optimizers['optimizerSD'] = optim.Adam(self.spectral_discriminator.parameters(), lr=self.d_lr, betas=(self.d_beta1, 0.999))
+            else:
+                optimizers['optimizerSD'] = optim.SGD(self.spectral_discriminator.parameters(), lr=self.d_lr)
+        
+        # If scheduler is True
+        if self.scheduler:
+            lr_schedulers['lr_schedulerD'] = {'scheduler': CosineAnnealingWarmRestarts(
+                optimizers['optimizerD'], T_0=self.lr_schedulerD_t0, T_mult=1, eta_min=self.d_lr/100, last_epoch=-1),
+                'interval': 'epoch', 'name': 'cosine-annealing-warm-restarts-desc'}
+            
+            lr_schedulers['lr_schedulerDAttr'] = {'scheduler': CosineAnnealingWarmRestarts(
+                optimizers['optimizerDAttr'], T_0=self.lr_schedulerDattr_t0, T_mult=1, eta_min=self.attr_d_lr/100, last_epoch=-1),
+                'interval': 'epoch', 'name': 'cosine-annealing-warm-restarts-desc-attr'}
+            
+            lr_schedulers['lr_schedulerG'] = {'scheduler': CosineAnnealingWarmRestarts(
+                optimizers['optimizerG'], T_0=self.lr_schedulerG_t0, T_mult=1, eta_min=self.g_lr/100, last_epoch=-1),
+                'interval': 'epoch', 'name': 'cosine-annealing-warm-restarts-gen'}
+            
+            # Adding the SpectralDiscriminator scheduler to the dictionary if enabled
+            if self.spectral_discriminator:
+                lr_schedulers['lr_schedulerSD'] = {'scheduler': CosineAnnealingWarmRestarts(
+                    optimizers['optimizerSD'], T_0=self.lr_schedulerD_t0, T_mult=1, eta_min=self.d_lr/100, last_epoch=-1),
+                    'interval': 'epoch', 'name': 'cosine-annealing-warm-restarts-sd'}
+        
+        else:  # If scheduler is False
+            return (
+                {'optimizer': optimizers['optimizerD']},
+                {'optimizer': optimizers['optimizerDAttr']},
+                {'optimizer': optimizers['optimizerG']},
+                {'optimizer': optimizers['optimizerSD']}
+            )
+
+        return {'optimizers': optimizers, 'lr_schedulers': lr_schedulers}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Combined loss
+
+def training_step(self, batch, batch_idx):
+    d_opt, dattr_opt, g_opt = self.optimizers()
+
+    if self.scheduler:
+        d_sch, dattr_sch, g_sch = self.lr_schedulers()
+
+    ##########################
+    # Prepare Batch Data
+    ##########################
+    batch1 = list(map(list, zip(*batch)))
+    real_attribute_pl_l, real_feature_pl_l = batch1
+
+    real_feature_pl = torch.concat(real_feature_pl_l, dim=1)
+    real_attribute_pl = torch.concat(real_attribute_pl_l, dim=1)
+
+    batch_size = real_feature_pl_l[0].size(0)
+
+    ##########################
+    # Generate Fake Data
+    ##########################
+    g_output_feature_train_tf, g_output_attribute_train_tf = self.sample_G(batch_size)
+
+    ##########################
+    # Optimize Discriminator #
+    ##########################
+    # Always use Discriminator for fake and real predictions
+    d_fake_train_tf = self.discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+    d_real_train_tf = self.discriminator(real_feature_pl, real_attribute_pl)
+
+    # Calculate losses for Discriminator
+    d_loss_fake = torch.mean(d_fake_train_tf)
+    d_loss_real = -torch.mean(d_real_train_tf)
+
+    # Optionally include SpectralDiscriminator in the training process
+    if self.spectral_discriminator:
+        # Using SpectralDiscriminator for additional fake and real predictions
+        sd_fake_train_tf = self.spectral_discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+        sd_real_train_tf = self.spectral_discriminator(real_feature_pl, real_attribute_pl)
+
+        # Calculate losses for SpectralDiscriminator
+        sd_loss_fake = torch.mean(sd_fake_train_tf)
+        sd_loss_real = -torch.mean(sd_real_train_tf)
+
+        # Combine SpectralDiscriminator and Discriminator losses
+        combined_d_loss_fake = d_loss_fake + sd_loss_fake
+        combined_d_loss_real = d_loss_real + sd_loss_real
+
+        # Use the combined losses for gradient penalty calculation and total discriminator loss
+        if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+            d_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl)
+            self.log("d_loss/gp", d_loss_gp)
+            d_loss = combined_d_loss_fake + combined_d_loss_real + self.d_gp_coe * d_loss_gp
+        else:
+            d_loss = combined_d_loss_fake + combined_d_loss_real
+    else:
+        # Use Discriminator losses for gradient penalty calculation and total discriminator loss
+        if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+            d_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl)
+            self.log("d_loss/gp", d_loss_gp)
+            d_loss = d_loss_fake + d_loss_real + self.d_gp_coe * d_loss_gp
+        else:
+            d_loss = d_loss_fake + d_loss_real
+
+    # Update Discriminator
+    d_opt.zero_grad()
+    self.manual_backward(d_loss)
+    d_opt.step()
+
+    # Step Discriminator scheduler if enabled
+    if self.scheduler:
+        d_sch.step()
+
+    # Log Discriminator losses
+    self.log("discriminator/d_loss", d_loss, on_step=True, prog_bar=True, logger=True)
+    self.log("discriminator/d_loss/fake", d_loss_fake, on_step=True, prog_bar=True, logger=True)
+    self.log("discriminator/d_loss/real", d_loss_real, on_step=True, prog_bar=True, logger=True)
+
+    # Optionally log SpectralDiscriminator losses for insights
+    if self.spectral_discriminator:
+        self.log("spectral_discriminator/sd_loss/fake", sd_loss_fake, on_step=True, prog_bar=True, logger=True)
+        self.log("spectral_discriminator/sd_loss/real", sd_loss_real, on_step=True, prog_bar=True, logger=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+seprate loss:
+
+
+def training_step(self, batch, batch_idx):
+    d_opt, dattr_opt, g_opt = self.optimizers()
+
+    if self.scheduler:
+        d_sch, dattr_sch, g_sch = self.lr_schedulers()
+
+    ##########################
+    # Prepare Batch Data
+    ##########################
+    batch1 = list(map(list, zip(*batch)))
+    real_attribute_pl_l, real_feature_pl_l = batch1
+
+    real_feature_pl = torch.concat(real_feature_pl_l, dim=1)
+    real_attribute_pl = torch.concat(real_attribute_pl_l, dim=1)
+
+    batch_size = real_feature_pl_l[0].size(0)
+
+    ##########################
+    # Generate Fake Data
+    ##########################
+    g_output_feature_train_tf, g_output_attribute_train_tf = self.sample_G(batch_size)
+
+    ##########################
+    # Optimize Discriminator #
+    ##########################
+    d_fake_train_tf = self.discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+    d_real_train_tf = self.discriminator(real_feature_pl, real_attribute_pl)
+
+    d_loss_fake = torch.mean(d_fake_train_tf)
+    d_loss_real = -torch.mean(d_real_train_tf)
+
+    # Calculate gradient penalty and total loss for Discriminator
+    if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+        d_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl)
+        self.log("discriminator/d_loss/gp", d_loss_gp)
+        d_loss = d_loss_fake + d_loss_real + self.d_gp_coe * d_loss_gp
+    else:
+        d_loss = d_loss_fake + d_loss_real
+
+    d_opt.zero_grad()
+    self.manual_backward(d_loss)
+    d_opt.step()
+
+    # Log Discriminator losses
+    self.log("discriminator/d_loss", d_loss, on_step=True, prog_bar=True, logger=True)
+    self.log("discriminator/d_loss/fake", d_loss_fake, on_step=True, prog_bar=True, logger=True)
+    self.log("discriminator/d_loss/real", d_loss_real, on_step=True, prog_bar=True, logger=True)
+
+    if self.scheduler:
+        d_sch.step()
+
+    ##########################
+    # Optionally Use SpectralDiscriminator #
+    ##########################
+    if self.spectral_discriminator:
+        # Note: Assuming an additional optimizer for SpectralDiscriminator is configured
+        sd_opt = self.optimizers()[-1]
+
+        sd_fake_train_tf = self.spectral_discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+        sd_real_train_tf = self.spectral_discriminator(real_feature_pl, real_attribute_pl)
+
+        sd_loss_fake = torch.mean(sd_fake_train_tf)
+        sd_loss_real = -torch.mean(sd_real_train_tf)
+
+        # Calculate total loss for SpectralDiscriminator
+        if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+            sd_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl, using_spectral=True)
+            self.log("spectral_discriminator/sd_loss/gp", sd_loss_gp)
+            sd_loss = sd_loss_fake + sd_loss_real + self.d_gp_coe * sd_loss_gp
+        else:
+            sd_loss = sd_loss_fake + sd_loss_real
+
+        sd_opt.zero_grad()
+        self.manual_backward(sd_loss)
+        sd_opt.step()
+
+        # Log SpectralDiscriminator losses
+        self.log("spectral_discriminator/sd_loss/fake", sd_loss_fake, on_step=True, prog_bar=True, logger=True)
+        self.log("spectral_discriminator/sd_loss/real", sd_loss_real, on_step=True, prog_bar=True, logger=True)
+
+
+
+
+
+
+def training_step(self, batch, batch_idx):
+    # Retrieve the optimizer for Discriminator, which will also be used for SpectralDiscriminator
+    d_opt, dattr_opt, g_opt = self.optimizers()
+
+    if self.scheduler:
+        d_sch, dattr_sch, g_sch = self.lr_schedulers()
+
+    # Prepare Batch Data
+    batch1 = list(map(list, zip(*batch)))
+    real_attribute_pl_l, real_feature_pl_l = batch1
+    real_feature_pl = torch.concat(real_feature_pl_l, dim=1)
+    real_attribute_pl = torch.concat(real_attribute_pl_l, dim=1)
+    batch_size = real_feature_pl_l[0].size(0)
+
+    # Generate Fake Data
+    g_output_feature_train_tf, g_output_attribute_train_tf = self.sample_G(batch_size)
+
+    # Process Discriminator with Fake and Real Data
+    d_fake_train_tf = self.discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+    d_real_train_tf = self.discriminator(real_feature_pl, real_attribute_pl)
+    d_loss_fake = torch.mean(d_fake_train_tf)
+    d_loss_real = -torch.mean(d_real_train_tf)
+
+    # Calculate Discriminator Loss including Gradient Penalty if applicable
+    d_loss = d_loss_fake + d_loss_real
+    if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+        d_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl)
+        d_loss += self.d_gp_coe * d_loss_gp
+        self.log("discriminator/d_loss/gp", d_loss_gp)
+
+    # Backpropagation for Discriminator
+    d_opt.zero_grad()
+    self.manual_backward(d_loss)
+    d_opt.step()
+
+    # Log Discriminator Losses
+    self.log("discriminator/d_loss", d_loss)
+    self.log("discriminator/d_loss/fake", d_loss_fake)
+    self.log("discriminator/d_loss/real", d_loss_real)
+
+    # Optionally Process SpectralDiscriminator if enabled
+    if self.spectral_discriminator:
+        sd_fake_train_tf = self.spectral_discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+        sd_real_train_tf = self.spectral_discriminator(real_feature_pl, real_attribute_pl)
+        sd_loss_fake = torch.mean(sd_fake_train_tf)
+        sd_loss_real = -torch.mean(sd_real_train_tf)
+
+        # Calculate SpectralDiscriminator Loss including Gradient Penalty if applicable
+        sd_loss = sd_loss_fake + sd_loss_real
+        if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+            sd_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl, using_spectral=True)
+            sd_loss += self.d_gp_coe * sd_loss_gp
+            self.log("spectral_discriminator/sd_loss/gp", sd_loss_gp)
+
+        # Backpropagation for SpectralDiscriminator (using the same optimizer)
+        d_opt.zero_grad()  # Reset gradients since we're reusing the optimizer
+        self.manual_backward(sd_loss)
+        d_opt.step()
+
+        # Log SpectralDiscriminator Losses
+        self.log("spectral_discriminator/sd_loss/fake", sd_loss_fake)
+        self.log("spectral_discriminator/sd_loss/real", sd_loss_real)
+
+    # Scheduler step if applicable
+    if self.scheduler:
+        d_sch.step()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def training_step(self, batch, batch_idx):
+    # Retrieve optimizers.
+    d_opt, dattr_opt, g_opt = self.optimizers()[:3]
+
+    # Check if using a spectral discriminator and retrieve its optimizer if so.
+    if self.spectral_discriminator:
+        sd_opt = self.optimizers()[-1]
+    else:
+        sd_opt = None
+
+    # Scheduler retrieval for step update.
+    if self.scheduler:
+        d_sch, dattr_sch, g_sch = self.lr_schedulers()
+
+    ##########################
+    # Prepare Batch Data
+    ##########################
+    batch1 = list(map(list, zip(*batch)))
+    real_attribute_pl_l, real_feature_pl_l = batch1
+    real_feature_pl = torch.concat(real_feature_pl_l, dim=1)
+    real_attribute_pl = torch.concat(real_attribute_pl_l, dim=1)
+    batch_size = real_feature_pl_l[0].size(0)
+
+    ##########################
+    # Generate Fake Data
+    ##########################
+    g_output_feature_train_tf, g_output_attribute_train_tf = self.sample_G(batch_size)
+
+    ##########################
+    # Optimize Discriminator #
+    ##########################
+    d_fake_train_tf = self.discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+    d_real_train_tf = self.discriminator(real_feature_pl, real_attribute_pl)
+    d_loss_fake = torch.mean(d_fake_train_tf)
+    d_loss_real = -torch.mean(d_real_train_tf)
+
+    # Calculate gradient penalty and total loss for Discriminator
+    d_loss = d_loss_fake + d_loss_real
+    if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+        d_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl)
+        d_loss += self.d_gp_coe * d_loss_gp
+    d_opt.zero_grad()
+    self.manual_backward(d_loss)
+    d_opt.step()
+
+    # Log Discriminator losses
+    self.log("discriminator/d_loss", d_loss)
+    self.log("discriminator/d_loss/fake", d_loss_fake)
+    self.log("discriminator/d_loss/real", d_loss_real)
+    if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+        self.log("discriminator/d_loss/gp", d_loss_gp)
+
+    ##########################
+    # Optionally Use SpectralDiscriminator
+    ##########################
+    if self.spectral_discriminator:
+        sd_fake_train_tf = self.spectral_discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+        sd_real_train_tf = self.spectral_discriminator(real_feature_pl, real_attribute_pl)
+        sd_loss_fake = torch.mean(sd_fake_train_tf)
+        sd_loss_real = -torch.mean(sd_real_train_tf)
+
+        # Calculate total loss for SpectralDiscriminator
+        sd_loss = sd_loss_fake + sd_loss_real
+        if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+            sd_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl, using_spectral=True)
+            sd_loss += self.d_gp_coe * sd_loss_gp
+
+        # Apply gradients for SpectralDiscriminator.
+        if sd_opt is not None:
+            sd_opt.zero_grad()
+            self.manual_backward(sd_loss)
+            sd_opt.step()
+
+            # Log SpectralDiscriminator losses
+            self.log("spectral_discriminator/sd_loss", sd_loss)
+            self.log("spectral_discriminator/sd_loss/fake", sd_loss_fake)
+            self.log("spectral_discriminator/sd_loss/real", sd_loss_real)
+            if self.d_gp_coe != 0 or self.d_gp_coe != 0.0:
+                self.log("spectral_discriminator/sd_loss/gp", sd_loss_gp)
+
+    # Scheduler steps.
+    if self.scheduler:
+        d_sch.step()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def training_step(self, batch, batch_idx):
+    # Retrieve optimizers.
+    d_opt, dattr_opt, g_opt = self.optimizers()[:-1]
+
+    # Check if using a spectral discriminator and retrieve its optimizer if so.
+    sd_opt = self.optimizers()[-1] if self.spectral_discriminator else None
+
+    # Scheduler retrieval for step update.
+    if self.scheduler:
+        schedulers = self.lr_schedulers()
+        d_sch, dattr_sch, g_sch = schedulers[:-1]
+        # Directly use the presence of spectral_discriminator to decide on scheduler retrieval
+        sd_sch = schedulers[-1] if self.spectral_discriminator else None
+
+    ##########################
+    # Prepare Batch Data
+    ##########################
+    batch1 = list(map(list, zip(*batch)))
+    real_attribute_pl_l, real_feature_pl_l = batch1
+    real_feature_pl = torch.concat(real_feature_pl_l, dim=1)
+    real_attribute_pl = torch.concat(real_attribute_pl_l, dim=1)
+    batch_size = real_feature_pl_l[0].size(0)
+
+    ##########################
+    # Generate Fake Data
+    ##########################
+    g_output_feature_train_tf, g_output_attribute_train_tf = self.sample_G(batch_size)
+
+    ##########################
+    # Optimize Discriminator #
+    ##########################
+    d_fake_train_tf = self.discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+    d_real_train_tf = self.discriminator(real_feature_pl, real_attribute_pl)
+    d_loss_fake = torch.mean(d_fake_train_tf)
+    d_loss_real = -torch.mean(d_real_train_tf)
+
+    # Calculate gradient penalty and total loss for Discriminator
+    d_loss = d_loss_fake + d_loss_real
+    if self.d_gp_coe != 0:
+        d_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl)
+        d_loss += self.d_gp_coe * d_loss_gp
+
+    d_opt.zero_grad()
+    self.manual_backward(d_loss)
+    d_opt.step()
+
+    # Log Discriminator losses
+    self.log("discriminator/d_loss", d_loss)
+    self.log("discriminator/d_loss/fake", d_loss_fake)
+    self.log("discriminator/d_loss/real", d_loss_real)
+    if self.d_gp_coe != 0:
+        self.log("discriminator/d_loss/gp", d_loss_gp)
+
+    ##########################
+    # Optionally Use SpectralDiscriminator
+    ##########################
+    if self.spectral_discriminator:
+        sd_fake_train_tf = self.spectral_discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+        sd_real_train_tf = self.spectral_discriminator(real_feature_pl, real_attribute_pl)
+        sd_loss_fake = torch.mean(sd_fake_train_tf)
+        sd_loss_real = -torch.mean(sd_real_train_tf)
+
+        # Calculate total loss for SpectralDiscriminator
+        sd_loss = sd_loss_fake + sd_loss_real
+        if self.d_gp_coe != 0:
+            sd_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl, using_spectral=True)
+            sd_loss += self.d_gp_coe * sd_loss_gp
+
+        if sd_opt is not None:
+            sd_opt.zero_grad()
+            self.manual_backward(sd_loss)
+            sd_opt.step()
+
+            # Log SpectralDiscriminator losses
+            self.log("spectral_discriminator/sd_loss", sd_loss)
+            self.log("spectral_discriminator/sd_loss/fake", sd_loss_fake)
+            self.log("spectral_discriminator/sd_loss/real", sd_loss_real)
+            if self.d_gp_coe != 0:
+                self.log("spectral_discriminator/sd_loss/gp", sd_loss_gp)
+
+    # Scheduler steps.
+    if self.scheduler:
+        d_sch.step()
+        dattr_sch.step()
+        g_sch.step()
+        if self.spectral_discriminator:
+            sd_sch.step()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def training_step(self, batch, batch_idx):
+    # Conditional assignment of optimizers based on the presence of a spectral discriminator.
+    if self.spectral_discriminator:
+        d_opt, dattr_opt, g_opt, sd_opt = self.optimizers()
+    else:
+        d_opt, dattr_opt, g_opt = self.optimizers()
+        sd_opt = None  # Explicitly set to None when no Spectral Discriminator is used.
+
+    # Scheduler retrieval with a similar conditional approach.
+    if self.scheduler:
+        if self.spectral_discriminator:
+            d_sch, dattr_sch, g_sch, sd_sch = self.lr_schedulers()
+        else:
+            d_sch, dattr_sch, g_sch = self.lr_schedulers()
+            sd_sch = None  # Explicitly set to None when no Spectral Discriminator is used.
+
+    ##########################
+    # Prepare Batch Data
+    ##########################
+    batch1 = list(map(list, zip(*batch)))
+    real_attribute_pl_l, real_feature_pl_l = batch1
+    real_feature_pl = torch.concat(real_feature_pl_l, dim=1)
+    real_attribute_pl = torch.concat(real_attribute_pl_l, dim=1)
+    batch_size = real_feature_pl_l[0].size(0)
+
+    ##########################
+    # Generate Fake Data
+    ##########################
+    g_output_feature_train_tf, g_output_attribute_train_tf = self.sample_G(batch_size)
+
+    ##########################
+    # Optimize Discriminator #
+    ##########################
+    d_fake_train_tf = self.discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+    d_real_train_tf = self.discriminator(real_feature_pl, real_attribute_pl)
+    d_loss_fake = torch.mean(d_fake_train_tf)
+    d_loss_real = -torch.mean(d_real_train_tf)
+
+    # Calculate gradient penalty and total loss for Discriminator
+    d_loss = d_loss_fake + d_loss_real
+    if self.d_gp_coe != 0:
+        d_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl)
+        d_loss += self.d_gp_coe * d_loss_gp
+
+    d_opt.zero_grad()
+    self.manual_backward(d_loss)
+    d_opt.step()
+
+    # Log Discriminator losses
+    self.log("discriminator/d_loss", d_loss)
+    self.log("discriminator/d_loss/fake", d_loss_fake)
+    self.log("discriminator/d_loss/real", d_loss_real)
+    if self.d_gp_coe != 0:
+        self.log("discriminator/d_loss/gp", d_loss_gp)
+
+    ##########################
+    # Optionally Use SpectralDiscriminator
+    ##########################
+    if self.spectral_discriminator and sd_opt is not None:
+        sd_fake_train_tf = self.spectral_discriminator(g_output_feature_train_tf.detach(), g_output_attribute_train_tf.detach())
+        sd_real_train_tf = self.spectral_discriminator(real_feature_pl, real_attribute_pl)
+        sd_loss_fake = torch.mean(sd_fake_train_tf)
+        sd_loss_real = -torch.mean(sd_real_train_tf)
+
+        # Calculate total loss for SpectralDiscriminator
+        sd_loss = sd_loss_fake + sd_loss_real
+        if self.d_gp_coe != 0:
+            sd_loss_gp = self.gradient_penalty(g_output_attribute_train_tf.detach(), g_output_feature_train_tf.detach(), real_attribute_pl, real_feature_pl, using_spectral=True)
+            sd_loss += self.d_gp_coe * sd_loss_gp
+
+        sd_opt.zero_grad()
+        self.manual_backward(sd_loss)
+        sd_opt.step()
+
+        # Log SpectralDiscriminator losses
+        self.log("spectral_discriminator/sd_loss", sd_loss)
+        self.log("spectral_discriminator/sd_loss/fake", sd_loss_fake)
+        self.log("spectral_discriminator/sd_loss/real", sd_loss_real)
+        if self.d_gp_coe != 0:
+            self.log("spectral_discriminator/sd_loss/gp", sd_loss_gp)
+
+    # Scheduler steps.
+    if self.scheduler:
+        d_sch.step()
+        dattr_sch.step()
+        g_sch.step()
+        if self.spectral_discriminator and sd_sch is not None:
+            sd_sch.step()
+
+
